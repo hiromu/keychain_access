@@ -142,7 +142,6 @@ int kca_print_private_key(SecKeychainItemRef p_keyItem,
     
     EVP_PKEY *pkey;
     
-    
     if(!p8inf)
     {
       fprintf(stderr, "Error decrypting key\n");
@@ -155,30 +154,6 @@ int kca_print_private_key(SecKeychainItemRef p_keyItem,
       fprintf(stderr, "Error converting key\n");
       ERR_print_errors_fp(stderr);
       return 1;
-    }
-    
-    if(p8inf->broken)
-    {
-      fprintf(stderr, "Warning: broken key encoding: ");
-      
-      switch(p8inf->broken)
-      {
-      case PKCS8_NO_OCTET:
-        fprintf(stderr, "No Octet String in PrivateKey\n");
-        break;
-        
-      case PKCS8_EMBEDDED_PARAM:
-        fprintf(stderr, "DSA parameters included in PrivateKey\n");
-        break;
-        
-      case PKCS8_NS_DB:
-        fprintf(stderr, "DSA public key include in PrivateKey\n");
-        break;
-        
-      default:
-        fprintf(stderr, "Unknown broken type\n");
-        break;
-      }
     }
     
     PKCS8_PRIV_KEY_INFO_free(p8inf);
@@ -195,7 +170,7 @@ int kca_print_private_key(SecKeychainItemRef p_keyItem,
 }
 
 
-int kca_print_public_key(SecKeychainItemRef p_keyItem)
+int kca_print_others(SecKeychainItemRef p_keyItem)
 {
   CFDataRef exportedData = 0;
   OSStatus status;
@@ -209,63 +184,26 @@ int kca_print_public_key(SecKeychainItemRef p_keyItem)
   
   status = SecKeychainItemExport(
       p_keyItem,
-      0,
+      kSecFormatUnknown,
       kSecItemPemArmour,
       &keyParams,
       &exportedData);
   
   if(status != noErr || exportedData == 0)
   {
-    fprintf(stderr,
-        "keychain_access: Exporting public key failed: %ld\n", status);
+    fprintf(stderr, "keychain_access: Exporting failed: %ld\n", status);
     return 1;
   }
   
-  char *pemBytes = (char*)CFDataGetBytePtr(exportedData);
-  
-  // Search for the first newline to know where the key data starts
-  char *firstNewLine = index(pemBytes, '\n');
-  
-  if(firstNewLine == NULL)
-  {
-    // This should not happen in practice, but just in case...
-reformat_panic:
-    fprintf(stderr, "keychain_access: Panic while reformating pubkey.\n");
-    return 1;
-  }
-  
-  int beginDiff = firstNewLine - pemBytes;
-  if(beginDiff < 0)
-    goto reformat_panic;
-  
-  
-  // Search for the end marker to know where the key data ends
-  char *endMarker = strnstr(
-      pemBytes, "\n-----END ", CFDataGetLength(exportedData));
-  
-  if(endMarker == NULL)
-    goto reformat_panic;
-  
-  int endDiff = endMarker - pemBytes;
-  if(endDiff < 0)
-    goto reformat_panic;
-  
-  
-  // Just print what is between the previous markers with 2 new markers around
-  // them, this new markers are acutally compatible with openssl now.
-  printf("-----BEGIN PUBLIC KEY-----");
-  fflush(stdout);
-  
-  write(fileno(stdout),
-      CFDataGetBytePtr(exportedData) + beginDiff, endDiff - beginDiff);
-  
-  puts("\n-----END PUBLIC KEY-----");
+  write(fileno(stdout), (char*)CFDataGetBytePtr(exportedData),
+      CFDataGetLength(exportedData));
   
   return 0;
 }
 
 
-int kca_print_key(const char *p_keyName, const char *p_keyPassword, SecItemClass p_searchItemClass)
+int kca_print_key(const char *p_keyName, const char *p_keyPassword,
+    SecItemClass p_searchItemClass)
 {
   OSStatus status = 0;
   SecKeychainSearchRef searchRef = 0;
@@ -310,7 +248,6 @@ searchFailed:
     return 1;
   }
 
-
   status = SecKeychainSearchCopyNext(
       searchRef, &itemRef);
 
@@ -318,8 +255,6 @@ searchFailed:
     goto searchFailed;
 
   // TODO: cleanup search
-
-
 
   status = SecKeychainItemCopyContent(
       itemRef, &itemClass, NULL, NULL, NULL);
@@ -331,11 +266,34 @@ searchFailed:
   }
 
 
-  if(itemClass == CSSM_DL_DB_RECORD_PRIVATE_KEY)
+  if(itemClass == CSSM_DL_DB_RECORD_PRIVATE_KEY) {
+    int attributeListSize = 1;
+    int attributeIndex = 0;
+    unsigned int trueValue = 1;
+
+    SecKeychainAttributeList privateKeyAttrList;
+    SecKeychainAttribute privateKeyKeyChainAttributes[attributeListSize];
+    privateKeyKeyChainAttributes[attributeIndex].tag = kSecKeyExtractable;
+    privateKeyKeyChainAttributes[attributeIndex].data = &trueValue;
+    privateKeyKeyChainAttributes[attributeIndex].length = sizeof(trueValue);
+
+    privateKeyAttrList.count = attributeListSize;
+    privateKeyAttrList.attr = privateKeyKeyChainAttributes;
+
+    status = SecKeychainItemModifyAttributesAndData(itemRef, &privateKeyAttrList, 0, NULL);
+    if(status != noErr) {
+      errorMessage = "Failed to change the attribute of %s: %d\n";
+      goto searchFailed;
+    }
+
     return kca_print_private_key(itemRef, p_keyPassword);
+  }
 
   else if(itemClass == CSSM_DL_DB_RECORD_PUBLIC_KEY)
-    return kca_print_public_key(itemRef);
+    return kca_print_others(itemRef);
+
+  else if(itemClass == CSSM_DL_DB_RECORD_X509_CERTIFICATE)
+    return kca_print_others(itemRef);
 
   else
   {
